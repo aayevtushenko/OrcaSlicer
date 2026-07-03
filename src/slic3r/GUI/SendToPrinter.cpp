@@ -876,7 +876,7 @@ void SendToPrinterDialog::on_ok(wxCommandEvent &event)
              wxString msg       = _L("Preparing print job");
              m_status_bar->update_status(msg, cancelled, 10, true);
              m_export_3mf_cancel = cancel = cancelled;
-         });
+         }, BambuMetadataMode::ReportedCompatibility);
      }
 
     if (m_is_canceled || m_export_3mf_cancel) {
@@ -895,7 +895,7 @@ void SendToPrinterDialog::on_ok(wxCommandEvent &event)
 
     // export config 3mf if needed
     if(!wxGetApp().plater()->using_exported_file() && !obj_->is_lan_mode_printer()) {
-            result = m_plater->export_config_3mf(m_print_plate_idx);
+            result = m_plater->export_config_3mf(m_print_plate_idx, nullptr, BambuMetadataMode::ReportedCompatibility);
             if (result < 0) {
                 BOOST_LOG_TRIVIAL(info) << "export_config_3mf failed, result = " << result;
                 return;

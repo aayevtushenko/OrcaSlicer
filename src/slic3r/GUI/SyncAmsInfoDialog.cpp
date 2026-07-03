@@ -1,4 +1,5 @@
 #include "SyncAmsInfoDialog.hpp"
+#include "libslic3r/CustomNozzle.hpp"
 
 #include <thread>
 #include <wx/event.h>
@@ -1460,7 +1461,13 @@ bool SyncAmsInfoDialog::build_nozzles_info(std::string &nozzles_info)
         }
         nozzle_item["type"] = nullptr;
         if (i >= 0 && i < opt_nozzle_volume_type->size()) { nozzle_item["flowSize"] = get_nozzle_volume_type_cloud_string((NozzleVolumeType) opt_nozzle_volume_type->get_at(i)); }
-        if (i >= 0 && i < opt_nozzle_diameters->size()) { nozzle_item["diameter"] = opt_nozzle_diameters->get_at(i); }
+        try {
+            nozzle_item["diameter"] = CustomNozzle::resolved_bambu_nozzle_diameter(
+                preset_bundle->printers.get_edited_preset().config, i);
+        } catch (const std::exception &e) {
+            BOOST_LOG_TRIVIAL(error) << "build_nozzles_info, invalid Bambu nozzle diameter for extruder " << i << ": " << e.what();
+            return false;
+        }
         nozzle_info_json.push_back(nozzle_item);
     }
     nozzles_info = nozzle_info_json.dump();

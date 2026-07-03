@@ -1,7 +1,10 @@
 #include <catch2/catch_all.hpp>
 
+#include <boost/filesystem.hpp>
+
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PrintConfigConstants.hpp"
+#include "libslic3r/CustomNozzle.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 
 #include <cereal/types/polymorphic.hpp>
@@ -10,6 +13,194 @@
 #include <cereal/archives/binary.hpp>
 
 using namespace Slic3r;
+
+SCENARIO("Bambu nozzle compatibility override configuration", "[Config][CustomNozzle]")
+{
+    GIVEN("a default full print configuration") {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+
+        THEN("the override is disabled and defaults to a firmware-supported 0.8 mm identity") {
+            const auto *enabled = config.option<ConfigOptionBools>("bambu_nozzle_diameter_override");
+            const auto *diameter = config.option<ConfigOptionFloats>("bambu_nozzle_diameter");
+            REQUIRE(enabled != nullptr);
+            REQUIRE(diameter != nullptr);
+            REQUIRE_FALSE(enabled->get_at(0));
+            REQUIRE(diameter->get_at(0) == Catch::Approx(0.8));
+            REQUIRE(CustomNozzle::resolved_bambu_nozzle_diameter(config, 0) == Catch::Approx(0.4));
+        }
+
+        WHEN("the override is enabled for a 1.57 mm physical nozzle") {
+            config.option<ConfigOptionFloats>("nozzle_diameter")->values = { 1.57 };
+            config.option<ConfigOptionBools>("bambu_nozzle_diameter_override")->values = { true };
+            config.option<ConfigOptionFloats>("bambu_nozzle_diameter")->values = { 0.8 };
+
+            THEN("the helper reports the override and resolves the transport diameter") {
+                REQUIRE(CustomNozzle::bambu_nozzle_diameter_override_enabled(config, 0));
+                REQUIRE(CustomNozzle::resolved_bambu_nozzle_diameter(config, 0) == Catch::Approx(0.8));
+                REQUIRE(config.validate().empty());
+            }
+        }
+
+        WHEN("the override is enabled with an unsupported diameter") {
+            config.option<ConfigOptionBools>("bambu_nozzle_diameter_override")->values = { true };
+            config.option<ConfigOptionFloats>("bambu_nozzle_diameter")->values = { 0.5 };
+
+            THEN("configuration validation reports it and runtime resolution fails closed to physical") {
+                REQUIRE(config.validate().count("bambu_nozzle_diameter") == 1);
+                REQUIRE_FALSE(CustomNozzle::bambu_nozzle_diameter_override_enabled(config, 0));
+                REQUIRE(CustomNozzle::resolved_bambu_nozzle_diameter(config, 0) == Catch::Approx(0.4));
+            }
+        }
+
+        WHEN("override vectors are misaligned") {
+            config.option<ConfigOptionFloats>("nozzle_diameter")->values = { 0.4, 1.57 };
+            config.option<ConfigOptionBools>("bambu_nozzle_diameter_override")->values = { false, true };
+            config.option<ConfigOptionFloats>("bambu_nozzle_diameter")->values = { 0.8 };
+
+            THEN("the missing exact entry cannot activate the override") {
+                REQUIRE(config.validate().count("bambu_nozzle_diameter") == 1);
+                REQUIRE_FALSE(CustomNozzle::bambu_nozzle_diameter_override_enabled(config, 1));
+                REQUIRE(CustomNozzle::resolved_bambu_nozzle_diameter(config, 1) == Catch::Approx(1.57));
+            }
+        }
+
+        WHEN("the extruder count grows") {
+            config.set_num_extruders(2);
+
+            THEN("both override fields grow with the physical nozzle vector") {
+                REQUIRE(config.option<ConfigOptionFloats>("nozzle_diameter")->values.size() == 2);
+                REQUIRE(config.option<ConfigOptionBools>("bambu_nozzle_diameter_override")->values.size() == 2);
+                REQUIRE(config.option<ConfigOptionFloats>("bambu_nozzle_diameter")->values.size() == 2);
+                REQUIRE_FALSE(config.option<ConfigOptionBools>("bambu_nozzle_diameter_override")->get_at(1));
+                REQUIRE(config.option<ConfigOptionFloats>("bambu_nozzle_diameter")->get_at(1) == Catch::Approx(0.8));
+            }
+        }
+    }
+
+    GIVEN("a legacy partial configuration without override keys") {
+        DynamicPrintConfig config;
+        config.set_key_value("nozzle_diameter", new ConfigOptionFloats { 1.57 });
+
+        THEN("the override is disabled and transport resolution uses the physical diameter") {
+            REQUIRE_FALSE(CustomNozzle::bambu_nozzle_diameter_override_enabled(config, 0));
+            REQUIRE(CustomNozzle::resolved_bambu_nozzle_diameter(config, 0) == Catch::Approx(1.57));
+        }
+    }
+
+    GIVEN("the supported Bambu nozzle identities") {
+        THEN("only the discrete firmware values are accepted") {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.option<ConfigOptionBools>("bambu_nozzle_diameter_override")->values = { true };
+            for (double diameter : { 0.2, 0.4, 0.6, 0.8 }) {
+                REQUIRE(CustomNozzle::is_supported_bambu_nozzle_diameter(diameter));
+                config.option<ConfigOptionFloats>("bambu_nozzle_diameter")->values = { diameter };
+                REQUIRE(config.validate().empty());
+            }
+            for (double diameter : { 0.0, 0.5, 1.0 })
+                REQUIRE_FALSE(CustomNozzle::is_supported_bambu_nozzle_diameter(diameter));
+        }
+    }
+
+    GIVEN("a physical 0.4 mm nozzle with the override disabled") {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+
+        WHEN("the device reports 0.8 mm") {
+            const auto result = CustomNozzle::evaluate_bambu_nozzle_compatibility(config, 0, 0.8);
+
+            THEN("physical identity is compared and the mismatch remains blocking") {
+                REQUIRE(result.physical_diameter == Catch::Approx(0.4));
+                REQUIRE(result.reported_diameter == Catch::Approx(0.4));
+                REQUIRE(result.device_diameter == Catch::Approx(0.8));
+                REQUIRE_FALSE(result.override_active);
+                REQUIRE_FALSE(result.device_unknown);
+                REQUIRE_FALSE(result.matches);
+            }
+        }
+    }
+
+    GIVEN("a physical 1.57 mm nozzle with the 0.8 mm override enabled") {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.option<ConfigOptionFloats>("nozzle_diameter")->values = { 1.57 };
+        config.option<ConfigOptionBools>("bambu_nozzle_diameter_override")->values = { true };
+        config.option<ConfigOptionFloats>("bambu_nozzle_diameter")->values = { 0.8 };
+
+        WHEN("the device reports 0.8 mm") {
+            const auto result = CustomNozzle::evaluate_bambu_nozzle_compatibility(config, 0, 0.8);
+
+            THEN("the reported identity matches and provenance remains available") {
+                REQUIRE(result.physical_diameter == Catch::Approx(1.57));
+                REQUIRE(result.reported_diameter == Catch::Approx(0.8));
+                REQUIRE(result.device_diameter == Catch::Approx(0.8));
+                REQUIRE(result.override_active);
+                REQUIRE_FALSE(result.device_unknown);
+                REQUIRE(result.matches);
+            }
+        }
+
+        WHEN("the device reports a different supported identity") {
+            const auto result = CustomNozzle::evaluate_bambu_nozzle_compatibility(config, 0, 0.6);
+
+            THEN("the override is active but the mismatch remains blocking") {
+                REQUIRE(result.override_active);
+                REQUIRE_FALSE(result.device_unknown);
+                REQUIRE_FALSE(result.matches);
+            }
+        }
+
+        WHEN("the device diameter is unknown") {
+            const auto result = CustomNozzle::evaluate_bambu_nozzle_compatibility(config, 0, 0.0);
+
+            THEN("existing unknown-device compatibility behavior is preserved") {
+                REQUIRE(result.override_active);
+                REQUIRE(result.device_unknown);
+                REQUIRE(result.matches);
+            }
+        }
+
+        WHEN("the device value differs only within protocol precision") {
+            const auto within_tolerance = CustomNozzle::evaluate_bambu_nozzle_compatibility(config, 0, 0.8005);
+            const auto outside_tolerance = CustomNozzle::evaluate_bambu_nozzle_compatibility(config, 0, 0.802);
+
+            THEN("the one-micron tolerance is applied consistently") {
+                REQUIRE(within_tolerance.matches);
+                REQUIRE_FALSE(outside_tolerance.matches);
+            }
+        }
+    }
+
+    GIVEN("a custom-nozzle machine configuration saved as JSON") {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.option<ConfigOptionFloats>("nozzle_diameter")->values = { 1.57 };
+        config.option<ConfigOptionBools>("bambu_nozzle_diameter_override")->values = { true };
+        config.option<ConfigOptionFloats>("bambu_nozzle_diameter")->values = { 0.8 };
+
+        const boost::filesystem::path path = boost::filesystem::temp_directory_path() /
+                                             boost::filesystem::unique_path("orca-custom-nozzle-%%%%-%%%%.json");
+        struct RemoveFile {
+            boost::filesystem::path path;
+            ~RemoveFile() {
+                boost::system::error_code ec;
+                boost::filesystem::remove(path, ec);
+            }
+        } cleanup { path };
+
+        WHEN("the configuration is saved and loaded") {
+            config.save_to_json(path.string(), "Custom A1 1.57", "User", "1.0.0");
+
+            DynamicPrintConfig loaded;
+            ConfigSubstitutionContext substitutions { ForwardCompatibilitySubstitutionRule::Disable };
+            std::map<std::string, std::string> key_values;
+            std::string reason;
+            REQUIRE(loaded.load_from_json(path.string(), substitutions, true, key_values, reason) == 0);
+
+            THEN("physical and Bambu compatibility values round-trip independently") {
+                REQUIRE(loaded.option<ConfigOptionFloats>("nozzle_diameter")->get_at(0) == Catch::Approx(1.57));
+                REQUIRE(loaded.option<ConfigOptionBools>("bambu_nozzle_diameter_override")->get_at(0));
+                REQUIRE(loaded.option<ConfigOptionFloats>("bambu_nozzle_diameter")->get_at(0) == Catch::Approx(0.8));
+            }
+        }
+    }
+}
 
 SCENARIO("Generic config validation performs as expected.", "[Config]") {
     GIVEN("A config generated from default options") {

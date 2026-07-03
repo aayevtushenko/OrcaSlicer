@@ -23,7 +23,9 @@ struct prePrintInfo
     wxString msg;
     wxString tips;
     wxString wiki_url;
-    int index;
+    // Participates in equality/deduplication even when a caller does not assign
+    // an explicit slot index.
+    int index {0};
 
 public:
     bool operator==(const prePrintInfo& other) const {
@@ -89,6 +91,7 @@ enum PrintDialogStatus : unsigned int {
     PrintStatusTimelapseWarning,
     PrintStatusMixAmsAndVtSlotWarning,
     PrintStatusToolHeadCoolingFanWarning,
+    PrintStatusBambuNozzleDiameterOverride,
     PrintStatusPrinterWarningEnd,
 
     // Warnings for filament
@@ -119,6 +122,13 @@ enum PrintDialogStatus : unsigned int {
     PrintStatusPublicInitFailed,
     PrintStatusPublicUploadFiled,
 };
+
+static_assert(PrintStatusPrinterWarningBegin < PrintStatusBambuNozzleDiameterOverride &&
+              PrintStatusBambuNozzleDiameterOverride < PrintStatusPrinterWarningEnd,
+              "The custom nozzle compatibility status must remain a printer warning");
+static_assert(!(PrintStatusErrorBegin < PrintStatusBambuNozzleDiameterOverride &&
+                PrintStatusBambuNozzleDiameterOverride < PrintStatusErrorEnd),
+              "The custom nozzle compatibility status must not block printing as an error");
 
 class PrePrintChecker
 {

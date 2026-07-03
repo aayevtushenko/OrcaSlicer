@@ -10,10 +10,37 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Flow.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Slicing.hpp"
 #include "libslic3r/libslic3r.h"
 
 using namespace Slic3r::Test;
 using namespace Slic3r;
+
+SCENARIO("Bambu nozzle compatibility overrides do not affect physical flow semantics", "[Flow][CustomNozzle]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values = { 1.57 };
+    config.option<ConfigOptionBools>("bambu_nozzle_diameter_override")->values = { true };
+    config.option<ConfigOptionFloats>("bambu_nozzle_diameter")->values = { 0.8 };
+
+    THEN("automatic line width uses the physical nozzle") {
+        config.option<ConfigOptionFloatOrPercent>("line_width")->value = 0;
+        config.option<ConfigOptionFloatOrPercent>("line_width")->percent = false;
+        REQUIRE(Flow::extrusion_width("line_width", config, 0) == Catch::Approx(1.125 * 1.57));
+    }
+
+    THEN("percentage line width uses the physical nozzle") {
+        config.option<ConfigOptionFloatOrPercent>("line_width")->value = 120;
+        config.option<ConfigOptionFloatOrPercent>("line_width")->percent = true;
+        REQUIRE(Flow::extrusion_width("line_width", config, 0) == Catch::Approx(1.2 * 1.57));
+    }
+
+    THEN("adaptive layer height uses the physical nozzle") {
+        config.option<ConfigOptionFloats>("max_layer_height")->values = { 0.0 };
+        REQUIRE(Slicing::max_layer_height_from_nozzle(config, 0) == Catch::Approx(0.75 * 1.57));
+    }
+}
 
 /// Test the expected behavior for auto-width,
 /// spacing, etc

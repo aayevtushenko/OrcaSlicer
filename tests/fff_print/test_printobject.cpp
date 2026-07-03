@@ -67,15 +67,50 @@ SCENARIO("PrintObject: object layer heights", "[PrintObject]") {
             }
         }
         WHEN("layer height exceeds the nozzle diameter") {
-            // Orca does not clamp an over-large layer height to the nozzle; it
-            // rejects the slice during flow computation. Pin that behavior.
-            THEN("Slicing is rejected") {
+            THEN("validation returns the dedicated layer-height error") {
                 Slic3r::Print print;
-                REQUIRE_THROWS(Slic3r::Test::init_and_process_print({TestMesh::cube_20x20x20}, print, {
+                Slic3r::Model model;
+                Slic3r::Test::init_print({TestMesh::cube_20x20x20}, print, model, {
                     { "initial_layer_print_height", 0.3 },
                     { "layer_height",               0.5 },
                     { "nozzle_diameter",            0.4 }
+                });
+
+                const StringObjectException error = print.validate();
+                REQUIRE(error.string == "Layer height cannot exceed nozzle diameter.");
+                REQUIRE(error.opt_key == "layer_height");
+                REQUIRE_FALSE(error.is_warning);
+                REQUIRE(error.object == print.objects().front());
+            }
+        }
+        WHEN("a Bambu transport override is smaller than the physical nozzle") {
+            THEN("layer height is validated against the physical nozzle") {
+                Slic3r::Print print;
+                REQUIRE_NOTHROW(Slic3r::Test::init_and_process_print({TestMesh::cube_20x20x20}, print, {
+                    { "initial_layer_print_height",       0.5 },
+                    { "layer_height",                     1.0 },
+                    { "nozzle_diameter",                  1.57 },
+                    { "bambu_nozzle_diameter_override",   true },
+                    { "bambu_nozzle_diameter",            0.8 }
                 }));
+            }
+        }
+        WHEN("a Bambu transport override is larger than the physical nozzle") {
+            THEN("it cannot bypass physical nozzle layer-height validation") {
+                Slic3r::Print print;
+                Slic3r::Model model;
+                Slic3r::Test::init_print({TestMesh::cube_20x20x20}, print, model, {
+                    { "initial_layer_print_height",       0.3 },
+                    { "layer_height",                     0.5 },
+                    { "nozzle_diameter",                  0.4 },
+                    { "bambu_nozzle_diameter_override",   true },
+                    { "bambu_nozzle_diameter",            0.8 }
+                });
+
+                const StringObjectException error = print.validate();
+                REQUIRE(error.string == "Layer height cannot exceed nozzle diameter.");
+                REQUIRE(error.opt_key == "layer_height");
+                REQUIRE_FALSE(error.is_warning);
             }
         }
     }

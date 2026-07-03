@@ -9,13 +9,17 @@
 #include "../GCode/ThumbnailData.hpp"
 #include "../Semver.hpp"
 #include "../Time.hpp"
+#include "../CustomNozzle.hpp"
 
 #include "../I18N.hpp"
 
 #include "bbs_3mf.hpp"
 
+#include <algorithm>
 #include <limits>
+#include <cmath>
 #include <stdexcept>
+#include <system_error>
 #include <iomanip>
 #include <regex>
 
@@ -366,6 +370,8 @@ static constexpr const char* EXTRUDER_TYPE_ATTR = "extruder_type";
 static constexpr const char* NOZZLE_VOLUME_TYPE_ATTR = "nozzle_volume_type";
 static constexpr const char* NOZZLE_TYPE_ATTR          = "nozzle_types";
 static constexpr const char* NOZZLE_DIAMETERS_ATTR = "nozzle_diameters";
+static constexpr const char* ORCA_PHYSICAL_NOZZLE_DIAMETERS_ATTR = "orca_physical_nozzle_diameters";
+static constexpr const char* ORCA_BAMBU_NOZZLE_OVERRIDE_ATTR     = "orca_bambu_nozzle_override";
 static constexpr const char* SLICE_PREDICTION_ATTR = "prediction";
 static constexpr const char* SLICE_WEIGHT_ATTR = "weight";
 static constexpr const char* FIRST_LAYER_TIME_ATTR = "first_layer_time";
@@ -676,6 +682,58 @@ bool bbs_is_valid_object_type(const std::string& type)
 }
 
 namespace Slic3r {
+
+static bool parse_physical_nozzle_diameters_strict(const std::string &serialized, std::vector<double> &diameters)
+{
+    diameters.clear();
+    if (serialized.empty())
+        return false;
+
+    const char *cursor = serialized.data();
+    const char *end = cursor + serialized.size();
+    while (cursor < end) {
+        const char *token_end = std::find(cursor, end, ',');
+        if (token_end == cursor)
+            return false;
+
+        double diameter = 0.0;
+        const auto parsed = fast_float::from_chars(cursor, token_end, diameter);
+        if (parsed.ec != std::errc() || parsed.ptr != token_end || !std::isfinite(diameter) || diameter < 0.005)
+            return false;
+        diameters.push_back(diameter);
+
+        if (token_end == end)
+            break;
+        cursor = token_end + 1;
+        if (cursor == end)
+            return false;
+    }
+    return !diameters.empty();
+}
+
+bool recover_orca_physical_nozzle_diameters(const PlateDataPtrs &plate_data_list, DynamicPrintConfig &config)
+{
+    const auto *loaded_nozzle_diameters = config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (loaded_nozzle_diameters != nullptr && !loaded_nozzle_diameters->values.empty())
+        return false;
+
+    std::string physical_diameters;
+    for (const PlateData *plate : plate_data_list) {
+        if (plate == nullptr || !plate->orca_bambu_nozzle_override || plate->orca_physical_nozzle_diameters.empty())
+            continue;
+        if (physical_diameters.empty())
+            physical_diameters = plate->orca_physical_nozzle_diameters;
+        else if (physical_diameters != plate->orca_physical_nozzle_diameters)
+            return false;
+    }
+
+    std::vector<double> recovered_diameters;
+    if (!parse_physical_nozzle_diameters_strict(physical_diameters, recovered_diameters))
+        return false;
+
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats(std::move(recovered_diameters)));
+    return true;
+}
 
 void PlateData::parse_filament_info(GCodeProcessorResult *result)
 {
@@ -1620,6 +1678,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             plate->slice_filaments_info = it->second->slice_filaments_info;
             plate->printer_model_id = it->second->printer_model_id;
             plate->nozzle_diameters = it->second->nozzle_diameters;
+            plate->orca_physical_nozzle_diameters = it->second->orca_physical_nozzle_diameters;
+            plate->orca_bambu_nozzle_override = it->second->orca_bambu_nozzle_override;
             plate->filament_maps = it->second->filament_maps;
             plate->filament_change_sequence = it->second->filament_change_sequence;
             plate->nozzle_change_sequence = it->second->nozzle_change_sequence;
@@ -2292,6 +2352,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             plate_data_list[it->first-1]->skipped_objects = it->second->skipped_objects;
             plate_data_list[it->first-1]->printer_model_id = it->second->printer_model_id;
             plate_data_list[it->first-1]->nozzle_diameters = it->second->nozzle_diameters;
+            plate_data_list[it->first-1]->orca_physical_nozzle_diameters = it->second->orca_physical_nozzle_diameters;
+            plate_data_list[it->first-1]->orca_bambu_nozzle_override = it->second->orca_bambu_nozzle_override;
             plate_data_list[it->first-1]->filament_maps = it->second->filament_maps;
             plate_data_list[it->first-1]->filament_change_sequence = it->second->filament_change_sequence;
             plate_data_list[it->first-1]->nozzle_change_sequence = it->second->nozzle_change_sequence;
@@ -2362,6 +2424,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             for (int index = delete_ids.size() - 1; index >= 0; index--)
                 m_model->delete_object(delete_ids[index]);
         }
+
+        // A transport archive may intentionally advertise a Bambu-compatible
+        // diameter in standard slice metadata. If project_settings.config is
+        // absent or lacks nozzle_diameter, recover only the physical diameter
+        // from Orca-authored provenance. Never infer or enable an override from
+        // foreign standard metadata alone.
+        recover_orca_physical_nozzle_diameters(plate_data_list, config);
 
         //BBS progress point
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format("import 3mf IMPORT_STAGE_FINISH\n");
@@ -4574,6 +4643,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 if (m_curr_plater)
                     m_curr_plater->nozzle_diameters = value;
             }
+            else if (key == ORCA_PHYSICAL_NOZZLE_DIAMETERS_ATTR)
+            {
+                if (m_curr_plater)
+                    m_curr_plater->orca_physical_nozzle_diameters = value;
+            }
+            else if (key == ORCA_BAMBU_NOZZLE_OVERRIDE_ATTR)
+            {
+                if (m_curr_plater)
+                    std::istringstream(value) >> std::boolalpha >> m_curr_plater->orca_bambu_nozzle_override;
+            }
         }
 
         return true;
@@ -5842,6 +5921,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_skip_auxiliary { false };    // skip normal axuiliary files
         bool m_use_loaded_id { false };        // whether to use loaded id for identify_id
         bool m_share_mesh { false };        // whether to share mesh between objects
+        BambuMetadataMode m_bambu_metadata_mode {BambuMetadataMode::Physical};
+        std::vector<double> m_bambu_metadata_nozzle_diameters;
+        bool m_bambu_nozzle_override_active {false};
         std::string m_thumbnail_middle = PRINTER_THUMBNAIL_MIDDLE_FILE;
         std::string m_thumbnail_small  = PRINTER_THUMBNAIL_SMALL_FILE;
         std::map<void const *, std::pair<ObjectData*, ModelVolume const *>> m_shared_meshes;
@@ -5941,6 +6023,22 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_from_backup_save = store_params.strategy & SaveStrategy::Backup;
 
         m_use_loaded_id = store_params.strategy & SaveStrategy::UseLoadedId;
+        m_bambu_metadata_mode = store_params.bambu_metadata_mode;
+        m_bambu_metadata_nozzle_diameters.clear();
+        m_bambu_nozzle_override_active = false;
+        if (store_params.config != nullptr) {
+            if (const auto *physical_diameters = store_params.config->option<ConfigOptionFloats>("nozzle_diameter")) {
+                m_bambu_metadata_nozzle_diameters = physical_diameters->values;
+                if (m_bambu_metadata_mode == BambuMetadataMode::ReportedCompatibility) {
+                    for (size_t extruder_id = 0; extruder_id < m_bambu_metadata_nozzle_diameters.size(); ++extruder_id) {
+                        m_bambu_nozzle_override_active |=
+                            CustomNozzle::bambu_nozzle_diameter_override_enabled(*store_params.config, extruder_id);
+                        m_bambu_metadata_nozzle_diameters[extruder_id] =
+                            CustomNozzle::resolved_bambu_nozzle_diameter(*store_params.config, extruder_id);
+                    }
+                }
+            }
+        }
 
         if (auto info = store_params.model->model_info) {
             if (auto iter = info->metadata_items.find("Thumbnail_Small"); iter != info->metadata_items.end())
@@ -6631,7 +6729,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     {
         bool res = false;
         nlohmann::json j;
-        id_bboxes.to_json(j);
+        PlateBBoxData metadata_bbox = id_bboxes;
+        if (m_bambu_metadata_mode == BambuMetadataMode::ReportedCompatibility && m_bambu_nozzle_override_active &&
+            id_bboxes.first_extruder >= 0 &&
+            static_cast<size_t>(id_bboxes.first_extruder) < m_bambu_metadata_nozzle_diameters.size())
+            metadata_bbox.nozzle_diameter = float(m_bambu_metadata_nozzle_diameters[id_bboxes.first_extruder]);
+        metadata_bbox.to_json(j);
         std::string out = j.dump();
 
         std::string json_file_name = (boost::format(PATTERN_CONFIG_FILE_FORMAT) % (index + 1)).str();
@@ -8201,12 +8304,20 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 stream << "\"/>\n";
 
                 auto* nozzle_diameter_option = dynamic_cast<const ConfigOptionFloats*>(config.option("nozzle_diameter"));
-                std::string nozzle_diameters_str;
-                if (nozzle_diameter_option)
-                    nozzle_diameters_str = nozzle_diameter_option->serialize();
+                const std::string physical_nozzle_diameters_str = nozzle_diameter_option ? nozzle_diameter_option->serialize() : std::string();
+                const bool use_reported_nozzle_diameters = m_bambu_metadata_mode == BambuMetadataMode::ReportedCompatibility &&
+                                                           m_bambu_nozzle_override_active &&
+                                                           !m_bambu_metadata_nozzle_diameters.empty();
+                const ConfigOptionFloats metadata_nozzle_diameters(m_bambu_metadata_nozzle_diameters);
+                const std::string nozzle_diameters_str = use_reported_nozzle_diameters ? metadata_nozzle_diameters.serialize() :
+                                                                                         physical_nozzle_diameters_str;
 
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRINTER_MODEL_ID_ATTR       << "\" " << VALUE_ATTR << "=\"" << plate_data->printer_model_id << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NOZZLE_DIAMETERS_ATTR       << "\" " << VALUE_ATTR << "=\"" << nozzle_diameters_str << "\"/>\n";
+                if (use_reported_nozzle_diameters && m_bambu_nozzle_override_active) {
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << ORCA_PHYSICAL_NOZZLE_DIAMETERS_ATTR << "\" " << VALUE_ATTR << "=\"" << physical_nozzle_diameters_str << "\"/>\n";
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << ORCA_BAMBU_NOZZLE_OVERRIDE_ATTR << "\" " << VALUE_ATTR << "=\"true\"/>\n";
+                }
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << TIMELAPSE_TYPE_ATTR << "\" " << VALUE_ATTR << "=\"" << timelapse_type << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SLICE_PREDICTION_ATTR << "\" " << VALUE_ATTR << "=\"" << plate_data->get_gcode_prediction_str() << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SLICE_WEIGHT_ATTR      << "\" " << VALUE_ATTR << "=\"" <<  plate_data->get_gcode_weight_str() << "\"/>\n";
@@ -8299,12 +8410,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         return filament_maps[filament_id] - 1;
                     return 0;
                 };
-                auto get_nozzle_diameter = [nozzle_diameter_option](int nozzle_group_id) {
-                    if (!nozzle_diameter_option || nozzle_diameter_option->values.empty())
+                auto get_nozzle_diameter = [this, nozzle_diameter_option, use_reported_nozzle_diameters](int nozzle_group_id) {
+                    const std::vector<double> *diameters = use_reported_nozzle_diameters ? &m_bambu_metadata_nozzle_diameters :
+                                                                                          (nozzle_diameter_option ? &nozzle_diameter_option->values : nullptr);
+                    if (diameters == nullptr || diameters->empty())
                         return 0.0;
-                    if (nozzle_group_id >= 0 && nozzle_group_id < static_cast<int>(nozzle_diameter_option->values.size()))
-                        return nozzle_diameter_option->values[nozzle_group_id];
-                    return nozzle_diameter_option->values.front();
+                    if (nozzle_group_id >= 0 && nozzle_group_id < static_cast<int>(diameters->size()))
+                        return (*diameters)[nozzle_group_id];
+                    return diameters->front();
                 };
                 auto get_nozzle_diameter_str = [&get_nozzle_diameter](int nozzle_group_id) {
                     std::ostringstream diameter_stream;
@@ -8329,7 +8442,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     if (std::find(used_nozzle_groups.begin(), used_nozzle_groups.end(), nozzle_group_id) == used_nozzle_groups.end())
                         used_nozzle_groups.push_back(nozzle_group_id);
                     const std::string filament_nozzle_group_id = it->group_id.empty() ? std::to_string(nozzle_group_id) : join_int_list_comma(it->group_id);
-                    const double filament_nozzle_diameter = it->nozzle_diameter > 0.0 ? it->nozzle_diameter : get_nozzle_diameter(nozzle_group_id);
+                    const double filament_nozzle_diameter = use_reported_nozzle_diameters ? get_nozzle_diameter(nozzle_group_id) :
+                        (it->nozzle_diameter > 0.0 ? it->nozzle_diameter : get_nozzle_diameter(nozzle_group_id));
                     const std::string filament_nozzle_volume_type = it->nozzle_volume_type.empty() ? get_nozzle_volume_type(nozzle_group_id) : it->nozzle_volume_type;
 
                     stream << "    <" << FILAMENT_TAG << " " << FILAMENT_ID_TAG << "=\"" << std::to_string(it->id + 1) << "\" "

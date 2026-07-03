@@ -242,7 +242,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "filament_notes",
         "process_notes",
         "printer_notes",
-        "use_3mf"
+        "use_3mf",
+        "bambu_nozzle_diameter_override",
+        "bambu_nozzle_diameter"
     };
 
     static std::unordered_set<std::string> steps_ignore;

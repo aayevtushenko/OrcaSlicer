@@ -47,6 +47,7 @@ std::string PrePrintChecker::get_print_status_info(PrintDialogStatus status)
     case PrintStatusTimelapseNoSdcard: return "PrintStatusTimelapseNoSdcard";
     case PrintStatusTimelapseWarning: return "PrintStatusTimelapseWarning";
     case PrintStatusMixAmsAndVtSlotWarning: return "PrintStatusMixAmsAndVtSlotWarning";
+    case PrintStatusBambuNozzleDiameterOverride: return "PrintStatusBambuNozzleDiameterOverride";
     case PrintStatusWarningKvalueNotUsed: return "PrintStatusWarningKvalueNotUsed";
     case PrintStatusHasFilamentInBlackListWarning: return "PrintStatusHasFilamentInBlackListWarning";
     case PrintStatusFilamentWarningHighChamberTemp: return "PrintStatusFilamentWarningHighChamberTemp";
@@ -89,6 +90,7 @@ wxString PrePrintChecker::get_pre_state_msg(PrintDialogStatus status)
     case PrintStatusBlankPlate: return _L("Cannot send a print job for an empty plate.");
     case PrintStatusTimelapseNoSdcard: return _L("Storage needs to be inserted to record timelapse.");
     case PrintStatusMixAmsAndVtSlotWarning: return _L("You have selected both external and AMS filaments for an extruder. You will need to manually switch the external filament during printing.");
+    case PrintStatusBambuNozzleDiameterOverride: return _L("A custom physical nozzle is using an explicit Bambu-compatible nozzle identity. Verify the installed nozzle and all custom flow settings before printing.");
     case PrintStatusTPUUnsupportAutoCali: return _L("TPU 90A/TPU 85A is too soft and does not support automatic Flow Dynamics calibration.");
     case PrintStatusWarningKvalueNotUsed: return _L("Set dynamic flow calibration to 'OFF' to enable custom dynamic flow value.");
     case PrintStatusNotSupportedPrintAll: return _L("This printer does not support printing all plates.");
@@ -248,5 +250,3 @@ bool PrinterMsgPanel::UpdateInfos(const std::vector<prePrintInfo>& infos)
 
 }
 };
-
-

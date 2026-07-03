@@ -54,6 +54,7 @@
 #include "libslic3r/Format/AMF.hpp"
 //#include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/CustomNozzle.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/SLA/Hollowing.hpp"
@@ -6965,6 +6966,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     if (obj->is_support_upgrade_kit && obj->installed_upgrade_kit) machine_type = "C12";
 
                     bool nozzle_mismatch = !obj->GetExtderSystem()->NozzleDiameterMatchesOrUnknown(0, (float) preset_nozzle_diameter);
+                    if (CustomNozzle::bambu_nozzle_diameter_override_enabled(printer_preset.config, 0)) {
+                        nozzle_mismatch = !CustomNozzle::evaluate_bambu_nozzle_compatibility(
+                            printer_preset.config, 0, obj->GetExtderSystem()->GetNozzleDiameter(0)).matches;
+                    }
                     if (printer_preset.get_current_printer_type(preset_bundle) != machine_type || nozzle_mismatch) {
                         Preset *machine_preset = get_printer_preset(obj);
                         if (machine_preset != nullptr) {
@@ -9681,7 +9686,13 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
 
                         const auto& extruders = obj->GetExtderSystem()->GetExtruders();
                         for (const DevExtder &extruder : extruders) {
-                            if (!obj->GetExtderSystem()->NozzleDiameterMatchesOrUnknown(extruder.GetExtId(), float(preset_nozzle_diameter))) {
+                            const int extruder_id = extruder.GetExtId();
+                            const bool override_active = CustomNozzle::bambu_nozzle_diameter_override_enabled(cur_preset.config, extruder_id);
+                            const bool diameter_matches = override_active ?
+                                CustomNozzle::evaluate_bambu_nozzle_compatibility(
+                                    cur_preset.config, extruder_id, obj->GetExtderSystem()->GetNozzleDiameter(extruder_id)).matches :
+                                obj->GetExtderSystem()->NozzleDiameterMatchesOrUnknown(extruder_id, float(preset_nozzle_diameter));
+                            if (!diameter_matches) {
                                 same_nozzle_diameter = false;
                             }
                         }
@@ -15625,7 +15636,8 @@ void publish(Model &model, SaveStrategy strategy) {
 }
 
 // BBS: backup
-int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy strategy, int export_plate_idx, Export3mfProgressFn proFn)
+int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy strategy, int export_plate_idx, Export3mfProgressFn proFn,
+                       BambuMetadataMode bambu_metadata_mode)
 {
     int ret = 0;
     //if (p->model.objects.empty()) {
@@ -15762,6 +15774,7 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     store_params.id_bboxes = plate_bboxes;//BBS
     store_params.project = &p->project;
     store_params.strategy = strategy | SaveStrategy::Zip64;
+    store_params.bambu_metadata_mode = bambu_metadata_mode;
 
 
     // get type and color for platedata
@@ -16387,7 +16400,7 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
 
     p->export_gcode(fs::path(), false, std::move(upload_job));
 }
-int Plater::send_gcode(int plate_idx, Export3mfProgressFn proFn)
+int Plater::send_gcode(int plate_idx, Export3mfProgressFn proFn, BambuMetadataMode bambu_metadata_mode)
 {
     int result = 0;
     /* generate 3mf */
@@ -16411,12 +16424,12 @@ int Plater::send_gcode(int plate_idx, Export3mfProgressFn proFn)
         strategy = SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::WithGcode;
 #endif
 
-    result = export_3mf(p->m_print_job_data._3mf_path, strategy, plate_idx, proFn);
+    result = export_3mf(p->m_print_job_data._3mf_path, strategy, plate_idx, proFn, bambu_metadata_mode);
 
     return result;
 }
 
-int Plater::export_config_3mf(int plate_idx, Export3mfProgressFn proFn)
+int Plater::export_config_3mf(int plate_idx, Export3mfProgressFn proFn, BambuMetadataMode bambu_metadata_mode)
 {
     int result = 0;
     /* generate 3mf */
@@ -16432,7 +16445,7 @@ int Plater::export_config_3mf(int plate_idx, Export3mfProgressFn proFn)
     }
 
     SaveStrategy strategy = SaveStrategy::Silence | SaveStrategy::SkipModel | SaveStrategy::WithSliceInfo | SaveStrategy::SkipAuxiliary;
-    result = export_3mf(p->m_print_job_data._3mf_config_path, strategy, plate_idx, proFn);
+    result = export_3mf(p->m_print_job_data._3mf_config_path, strategy, plate_idx, proFn, bambu_metadata_mode);
 
     return result;
 }

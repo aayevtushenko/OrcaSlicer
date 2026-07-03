@@ -4,6 +4,7 @@
 #include "PresetHints.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/CustomNozzle.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -25,6 +26,7 @@
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
+#include <cmath>
 #include "libslic3r/libslic3r.h"
 #include "slic3r/GUI/OptionsGroup.hpp"
 #include "wxExtensions.hpp"
@@ -5443,7 +5445,7 @@ if (is_marlin_flavor)
             optgroup->m_on_change = [this, extruder_idx](const t_config_option_key& opt_key, boost::any value)
             {
                 bool is_SEMM = m_config->opt_bool("single_extruder_multi_material");
-                if (is_SEMM && m_extruders_count > 1 && opt_key.find_first_of("nozzle_diameter") != std::string::npos)
+                if (is_SEMM && m_extruders_count > 1 && opt_key == "nozzle_diameter")
                 {
                     SuppressBackgroundProcessingUpdate sbpu;
                     const double new_nd = boost::any_cast<double>(value);
@@ -5469,6 +5471,87 @@ if (is_marlin_flavor)
                             nozzle_diameters[extruder_idx] = nozzle_diameters[extruder_idx == 0 ? 1 : 0];
 
                         new_conf.set_key_value("nozzle_diameter", new ConfigOptionFloats(nozzle_diameters));
+                        load_config(new_conf);
+                    }
+                }
+
+                update_dirty();
+                on_value_change(opt_key, value);
+                update();
+            };
+
+            optgroup = page->new_optgroup(L("Bambu printer compatibility"), L"param_advanced", -1, true);
+            optgroup->append_single_option_line("bambu_nozzle_diameter_override", std::string(), extruder_idx);
+            optgroup->append_single_option_line("bambu_nozzle_diameter", std::string(), extruder_idx);
+            optgroup->m_on_change = [this, extruder_idx](const t_config_option_key& opt_key, boost::any value) {
+                const auto nearest_supported_diameter = [](double diameter) {
+                    constexpr double supported_diameters[] = { 0.2, 0.4, 0.6, 0.8 };
+                    double nearest = supported_diameters[0];
+                    for (double candidate : supported_diameters)
+                        if (std::abs(candidate - diameter) < std::abs(nearest - diameter))
+                            nearest = candidate;
+                    return nearest;
+                };
+
+                if (opt_key == "bambu_nozzle_diameter") {
+                    const double reported_diameter = boost::any_cast<double>(value);
+                    if (!CustomNozzle::is_supported_bambu_nozzle_diameter(reported_diameter)) {
+                        const double corrected_diameter = nearest_supported_diameter(reported_diameter);
+                        const wxString msg_text = wxString::Format(
+                            _(L("Bambu printers only support reported nozzle identities of 0.2, 0.4, 0.6, or 0.8 mm. "
+                                "The entered value has been changed to %.1f mm.")),
+                            corrected_diameter);
+                        MessageDialog dialog(parent(), msg_text, _(L("Unsupported Bambu nozzle identity")), wxICON_WARNING | wxOK);
+                        dialog.ShowModal();
+
+                        DynamicPrintConfig new_conf = *m_config;
+                        auto *reported = static_cast<ConfigOptionFloats *>(m_config->option("bambu_nozzle_diameter")->clone());
+                        if (reported->values.size() <= extruder_idx)
+                            reported->values.resize(extruder_idx + 1, reported->values.empty() ? 0.8 : reported->values.back());
+                        reported->values[extruder_idx] = corrected_diameter;
+                        new_conf.set_key_value("bambu_nozzle_diameter", reported);
+                        load_config(new_conf);
+                        update_dirty();
+                        on_value_change(opt_key, corrected_diameter);
+                        update();
+                        return;
+                    }
+                }
+
+                if (opt_key == "bambu_nozzle_diameter_override" && boost::any_cast<bool>(value)) {
+                    const wxString msg_text = _(
+                        L("This expert setting reports a firmware-supported nozzle identity to a Bambu printer. "
+                          "Slicing and extrusion calculations will continue to use the physical nozzle diameter.\n\n"
+                          "Orca cannot verify custom hardware, heater capacity, extrusion limits, or firmware behavior. "
+                          "Enable this override only if you installed and calibrated the custom nozzle yourself.\n\n"
+                          "Do you want to enable the Bambu nozzle diameter override?"));
+                    MessageDialog dialog(parent(), msg_text, _(L("Custom nozzle override")), wxICON_WARNING | wxYES_NO);
+                    if (dialog.ShowModal() != wxID_YES) {
+                        DynamicPrintConfig new_conf = *m_config;
+                        auto *overrides = static_cast<ConfigOptionBools *>(m_config->option("bambu_nozzle_diameter_override")->clone());
+                        if (overrides->values.size() <= extruder_idx)
+                            overrides->values.resize(extruder_idx + 1, overrides->values.empty() ? false : overrides->values.back());
+                        overrides->values[extruder_idx] = false;
+                        new_conf.set_key_value("bambu_nozzle_diameter_override", overrides);
+                        load_config(new_conf);
+                        update_dirty();
+                        on_value_change(opt_key, false);
+                        update();
+                        return;
+                    }
+
+                    const double physical_diameter = m_config->option<ConfigOptionFloats>("nozzle_diameter")->get_at(extruder_idx);
+                    const auto *reported = m_config->option<ConfigOptionFloats>("bambu_nozzle_diameter");
+                    const bool has_valid_exact_value = reported != nullptr && reported->values.size() > extruder_idx &&
+                        CustomNozzle::is_supported_bambu_nozzle_diameter(reported->values[extruder_idx]);
+                    if (!has_valid_exact_value) {
+                        DynamicPrintConfig new_conf = *m_config;
+                        auto *corrected_reported = static_cast<ConfigOptionFloats *>(m_config->option("bambu_nozzle_diameter")->clone());
+                        if (corrected_reported->values.size() <= extruder_idx)
+                            corrected_reported->values.resize(extruder_idx + 1,
+                                corrected_reported->values.empty() ? 0.8 : corrected_reported->values.back());
+                        corrected_reported->values[extruder_idx] = nearest_supported_diameter(physical_diameter);
+                        new_conf.set_key_value("bambu_nozzle_diameter", corrected_reported);
                         load_config(new_conf);
                     }
                 }
@@ -5874,6 +5957,12 @@ void TabPrinter::toggle_options()
         size_t i = size_t(val - 1);
         int variant_index = get_index_for_extruder(i);
         bool have_retract_length = m_config->opt_float("retraction_length", variant_index) > 0;
+
+        const auto *bambu_override = m_config->option<ConfigOptionBools>("bambu_nozzle_diameter_override");
+        const bool raw_bambu_override_active = bambu_override != nullptr && i < bambu_override->values.size() &&
+                                               bambu_override->values[i];
+        toggle_line("bambu_nozzle_diameter_override", is_BBL_printer, i);
+        toggle_line("bambu_nozzle_diameter", is_BBL_printer && raw_bambu_override_active, i);
 
         toggle_option("extruder_printable_area", false, i);          // disable
         toggle_line("extruder_printable_area", m_preset_bundle->get_printer_extruder_count() == 2, i);  //hide

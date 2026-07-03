@@ -493,7 +493,8 @@ public:
     //void export_amf();
     //BBS add extra param for exporting 3mf silence
     // BBS: backup
-    int export_3mf(const boost::filesystem::path& output_path = boost::filesystem::path(), SaveStrategy strategy = SaveStrategy::Default, int export_plate_idx = -1, Export3mfProgressFn proFn = nullptr);
+    int export_3mf(const boost::filesystem::path& output_path = boost::filesystem::path(), SaveStrategy strategy = SaveStrategy::Default, int export_plate_idx = -1,
+                   Export3mfProgressFn proFn = nullptr, BambuMetadataMode bambu_metadata_mode = BambuMetadataMode::Physical);
 
     //BBS
     void publish_project();
@@ -521,9 +522,11 @@ public:
     void suppress_background_process(const bool stop_background_process) ;
     /* -1: send current gcode if not specified
      * -2: send all gcode to target machine */
-    int send_gcode(int plate_idx = -1, Export3mfProgressFn proFn = nullptr);
+    int send_gcode(int plate_idx = -1, Export3mfProgressFn proFn = nullptr,
+                   BambuMetadataMode bambu_metadata_mode = BambuMetadataMode::Physical);
     void send_gcode_legacy(int plate_idx = -1, Export3mfProgressFn proFn = nullptr);
-    int export_config_3mf(int plate_idx = -1, Export3mfProgressFn proFn = nullptr);
+    int export_config_3mf(int plate_idx = -1, Export3mfProgressFn proFn = nullptr,
+                          BambuMetadataMode bambu_metadata_mode = BambuMetadataMode::Physical);
     //BBS jump to nonitor after print job finished
     void send_calibration_job_finished(wxCommandEvent &evt);
     void print_job_finished(wxCommandEvent &evt);

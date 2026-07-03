@@ -337,3 +337,29 @@ TEST_CASE("Print::validate tolerates a null warnings pointer", "[Print][validate
     StringObjectException err = print.validate();  // warnings == nullptr
     CHECK(err.string.empty());
 }
+
+TEST_CASE("Bambu nozzle compatibility settings invalidate export without reslicing", "[Print][invalidate][CustomNozzle]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    Model model;
+    Print print;
+    Slic3r::Test::init_print({TestMesh::cube_20x20x20}, print, model, config);
+    print.process();
+    print.set_gcode_file_ready();
+
+    REQUIRE(print.is_step_done(posSlice));
+    REQUIRE(print.is_step_done(psGCodeExport));
+
+    config.option<ConfigOptionBools>("bambu_nozzle_diameter_override")->values = { true };
+    print.apply(model, config);
+
+    CHECK(print.is_step_done(posSlice));
+    CHECK_FALSE(print.is_step_done(psGCodeExport));
+
+    print.set_gcode_file_ready();
+    config.option<ConfigOptionFloats>("bambu_nozzle_diameter")->values = { 0.6 };
+    print.apply(model, config);
+
+    CHECK(print.is_step_done(posSlice));
+    CHECK_FALSE(print.is_step_done(psGCodeExport));
+}

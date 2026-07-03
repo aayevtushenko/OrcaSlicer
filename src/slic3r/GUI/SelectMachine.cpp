@@ -4,6 +4,7 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/Color.hpp"
+#include "libslic3r/CustomNozzle.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
 #include "GUI_Preview.hpp"
@@ -1292,8 +1293,12 @@ bool SelectMachineDialog::build_nozzles_info(std::string& nozzles_info)
         if (i >= 0 && i < opt_nozzle_volume_type->size()) {
             nozzle_item["flowSize"] = get_nozzle_volume_type_cloud_string((NozzleVolumeType)opt_nozzle_volume_type->get_at(i));
         }
-        if (i >= 0 && i < opt_nozzle_diameters->size()) {
-            nozzle_item["diameter"] = opt_nozzle_diameters->get_at(i);
+        try {
+            nozzle_item["diameter"] = CustomNozzle::resolved_bambu_nozzle_diameter(
+                preset_bundle->printers.get_edited_preset().config, i);
+        } catch (const std::exception &e) {
+            BOOST_LOG_TRIVIAL(error) << "build_nozzles_info, invalid Bambu nozzle diameter for extruder " << i << ": " << e.what();
+            return false;
         }
         nozzle_info_json.push_back(nozzle_item);
     }
@@ -1660,6 +1665,9 @@ void SelectMachineDialog::show_status(PrintDialogStatus status, std::vector<wxSt
     } else if (status == PrintStatusToolHeadCoolingFanWarning) {
         Enable_Refresh_Button(true);
         Enable_Send_Button(true);
+    } else if (status == PrintStatusBambuNozzleDiameterOverride) {
+        Enable_Refresh_Button(true);
+        Enable_Send_Button(true);
     } else if (status == PrintStatusMixAmsAndVtSlotWarning) {
         Enable_Refresh_Button(true);
         Enable_Send_Button(true);
@@ -1786,21 +1794,17 @@ static bool _is_nozzle_data_valid(MachineObject* obj_, const DevExtderSystem &ex
 }
 
 
-/**************************************************************//*
- * @param tag_nozzle_type -- return the mismatch nozzle type
- * @param tag_nozzle_diameter -- return the target nozzle_diameter but mismatch
- * @return is same or not
-/*************************************************************/
-static bool _is_same_nozzle_diameters(MachineObject* obj, float &tag_nozzle_diameter, int& mismatch_nozzle_id)
+static bool _is_same_nozzle_diameters(MachineObject *obj, int &mismatch_nozzle_id,
+                                      CustomNozzle::BambuNozzleCompatibility &compatibility)
 {
     if (obj == nullptr) return false;
 
+    compatibility = {};
+    compatibility.matches = true;
+
     PresetBundle* preset_bundle = wxGetApp().preset_bundle;
-    auto opt_nozzle_diameters = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
-    if (!opt_nozzle_diameters)
-    {
-        return false;
-    }
+    if (preset_bundle == nullptr) return false;
+    const auto &printer_config = preset_bundle->printers.get_edited_preset().config;
 
     try
     {
@@ -1815,20 +1819,15 @@ static bool _is_same_nozzle_diameters(MachineObject* obj, float &tag_nozzle_diam
                 return false;
             }
 
-            tag_nozzle_diameter = float(opt_nozzle_diameters->get_at(used_nozzle_idx));
-            auto machine_nozzle_diameter = obj->GetExtderSystem()->GetNozzleDiameter(used_nozzle_idx);
-
-            // Assume matching if diameter is unknown
-            if (machine_nozzle_diameter == 0.0f)
-            {
-                continue;
-            }
-
-            if (tag_nozzle_diameter != machine_nozzle_diameter)
-            {
+            const auto evaluated = CustomNozzle::evaluate_bambu_nozzle_compatibility(
+                printer_config, used_nozzle_idx, obj->GetExtderSystem()->GetNozzleDiameter(used_nozzle_idx));
+            if (!evaluated.matches) {
+                compatibility = evaluated;
                 mismatch_nozzle_id = used_nozzle_idx;
                 return false;
             }
+            if (evaluated.override_active)
+                compatibility = evaluated;
         }
     }
     catch (const std::exception&)
@@ -1837,6 +1836,18 @@ static bool _is_same_nozzle_diameters(MachineObject* obj, float &tag_nozzle_diam
     }
 
     return true;
+}
+
+static wxString _custom_nozzle_compatibility_warning(const CustomNozzle::BambuNozzleCompatibility &compatibility)
+{
+    if (compatibility.device_unknown) {
+        return wxString::Format(
+            _L("Custom nozzle mode: sliced for a physical %.2f mm nozzle and reporting %.2f mm; the printer diameter is unknown."),
+            compatibility.physical_diameter, compatibility.reported_diameter);
+    }
+    return wxString::Format(
+        _L("Custom nozzle mode: sliced for a physical %.2f mm nozzle, reporting %.2f mm to a printer configured for %.2f mm."),
+        compatibility.physical_diameter, compatibility.reported_diameter, compatibility.device_diameter);
 }
 
 bool SelectMachineDialog::is_nozzle_hrc_matched(const DevExtder* extruder, std::string& filament_type) const
@@ -1964,6 +1975,17 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
     if (!is_same_printer_type && (m_print_type == PrintFromType::FROM_NORMAL)) {
         confirm_text.push_back(ConfirmBeforeSendInfo(_L("The printer type selected when generating G-code is not consistent with the currently selected printer. It is recommended that you use the same printer type for slicing.")));
         has_slice_warnings = true;
+    }
+
+    if (m_print_type == PrintFromType::FROM_NORMAL) {
+        int mismatch_nozzle_id = 0;
+        CustomNozzle::BambuNozzleCompatibility compatibility;
+        if (_is_same_nozzle_diameters(obj_, mismatch_nozzle_id, compatibility) && compatibility.override_active) {
+            confirm_text.push_back(ConfirmBeforeSendInfo(
+                _custom_nozzle_compatibility_warning(compatibility) + " " +
+                _L("Confirm that the installed nozzle and the custom flow, temperature, and motion settings are correct before sending.")));
+            has_slice_warnings = true;
+        }
     }
 
     //check blacklist
@@ -2439,7 +2461,7 @@ void SelectMachineDialog::on_send_print()
             wxString msg = _L("Preparing print job");
             m_status_bar->update_status(msg, cancelled, 10, true);
             m_export_3mf_cancel = cancel = cancelled;
-            });
+            }, BambuMetadataMode::ReportedCompatibility);
 
         if (m_is_canceled || m_export_3mf_cancel) {
             BOOST_LOG_TRIVIAL(info) << "print_job: m_export_3mf_cancel or m_is_canceled";
@@ -2455,7 +2477,7 @@ void SelectMachineDialog::on_send_print()
 
         // export config 3mf if needed
         if (!obj_->is_lan_mode_printer()) {
-            result = m_plater->export_config_3mf(m_print_plate_idx);
+            result = m_plater->export_config_3mf(m_print_plate_idx, nullptr, BambuMetadataMode::ReportedCompatibility);
             if (result < 0) {
                 BOOST_LOG_TRIVIAL(info) << "export_config_3mf failed, result = " << result;
                 return;
@@ -3380,8 +3402,8 @@ void SelectMachineDialog::update_show_status(MachineObject* obj_)
     if (m_print_type == PrintFromType::FROM_NORMAL)
     {
         int mismatch_nozzle_id = 0;
-        float nozzle_diameter = 0;
-        if (!_is_same_nozzle_diameters(obj_, nozzle_diameter, mismatch_nozzle_id))
+        CustomNozzle::BambuNozzleCompatibility compatibility;
+        if (!_is_same_nozzle_diameters(obj_, mismatch_nozzle_id, compatibility))
         {
             std::vector<wxString> msg_params;
             if (obj_->GetExtderSystem()->GetTotalExtderCount() == 2) {
@@ -3392,22 +3414,35 @@ void SelectMachineDialog::update_show_status(MachineObject* obj_)
                     mismatch_nozzle_str = _L("left nozzle");
                 }
 
-                const wxString &nozzle_config = wxString::Format(_L("The %s diameter(%.1fmm) of current printer doesn't match with the slicing file (%.1fmm). "
-                                                                    "Please make sure the nozzle installed matches with settings in printer, then set the "
-                                                                    "corresponding printer preset when slicing."),
-                                                                 mismatch_nozzle_str, obj_->GetExtderSystem()->GetNozzleDiameter(mismatch_nozzle_id), nozzle_diameter);
+                const wxString nozzle_config = compatibility.override_active ?
+                    wxString::Format(_L("The %s is configured as %.2f mm, but this preset reports %.2f mm for Bambu compatibility "
+                                          "while slicing for a physical %.2f mm nozzle. Select a matching compatibility diameter or update Printer parts."),
+                                     mismatch_nozzle_str, compatibility.device_diameter, compatibility.reported_diameter,
+                                     compatibility.physical_diameter) :
+                    wxString::Format(_L("The %s diameter(%.1fmm) of current printer doesn't match with the slicing file (%.1fmm). "
+                                          "Please make sure the nozzle installed matches with settings in printer, then set the "
+                                          "corresponding printer preset when slicing."),
+                                     mismatch_nozzle_str, compatibility.device_diameter, compatibility.physical_diameter);
                 msg_params.emplace_back(nozzle_config);
             } else {
-                const wxString &nozzle_config = wxString::Format(_L("The current nozzle diameter (%.1fmm) doesn't match with the slicing file (%.1fmm). "
-                                                                    "Please make sure the nozzle installed matches with settings in printer, then set the "
-                                                                    "corresponding printer preset when slicing."),
-                                                                 obj_->GetExtderSystem()->GetNozzleDiameter(0), nozzle_diameter);
+                const wxString nozzle_config = compatibility.override_active ?
+                    wxString::Format(_L("The printer is configured as %.2f mm, but this preset reports %.2f mm for Bambu compatibility "
+                                          "while slicing for a physical %.2f mm nozzle. Select a matching compatibility diameter or update Printer parts."),
+                                     compatibility.device_diameter, compatibility.reported_diameter, compatibility.physical_diameter) :
+                    wxString::Format(_L("The current nozzle diameter (%.1fmm) doesn't match with the slicing file (%.1fmm). "
+                                          "Please make sure the nozzle installed matches with settings in printer, then set the "
+                                          "corresponding printer preset when slicing."),
+                                     compatibility.device_diameter, compatibility.physical_diameter);
                 msg_params.emplace_back(nozzle_config);
             }
 
             msg_params.emplace_back(_L("Tips: If you changed your nozzle of your printer lately, Please go to 'Device -> Printer parts' to change your nozzle setting."));
             show_status(PrintDialogStatus::PrintStatusNozzleDiameterMismatch, msg_params);
             return;
+        }
+        if (compatibility.override_active) {
+            show_status(PrintDialogStatus::PrintStatusBambuNozzleDiameterOverride,
+                        { _custom_nozzle_compatibility_warning(compatibility) });
         }
 
         const auto &used_nozzle_idxes = _get_used_nozzle_idxes();

@@ -7,6 +7,7 @@
 #include "../GUI/PartPlate.hpp"
 #include "libslic3r/CutUtils.hpp"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/CustomNozzle.hpp"
 
 #include "libslic3r/Model.hpp"
 #include "slic3r/GUI/Jobs/BoostThreadWorker.hpp"
@@ -269,6 +270,17 @@ static bool is_same_nozzle_type(const DynamicPrintConfig &full_config, const Mac
 
 static bool check_nozzle_diameter_and_type(const DynamicPrintConfig &full_config, wxString& error_msg)
 {
+    const auto *override_enabled = full_config.option<ConfigOptionBools>("bambu_nozzle_diameter_override");
+    if (override_enabled != nullptr) {
+        for (size_t extruder_id = 0; extruder_id < override_enabled->values.size(); ++extruder_id) {
+            if (CustomNozzle::bambu_nozzle_diameter_override_enabled(full_config, extruder_id)) {
+                error_msg = _L("Automated calibration is not supported while the Bambu nozzle diameter override is enabled. "
+                               "Disable the override and use a firmware-supported physical nozzle before starting PA or flow calibration.");
+                return false;
+            }
+        }
+    }
+
     DeviceManager *dev = Slic3r::GUI::wxGetApp().getDeviceManager();
     if (!dev) {
         error_msg = _L("Need select printer");

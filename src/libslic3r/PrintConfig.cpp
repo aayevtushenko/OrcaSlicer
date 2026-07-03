@@ -2,6 +2,7 @@
 #include "PrintConfigConstants.hpp"
 #include "ClipperUtils.hpp"
 #include "Config.hpp"
+#include "CustomNozzle.hpp"
 #include "MaterialType.hpp"
 #include "I18N.hpp"
 #include "format.hpp"
@@ -4858,6 +4859,24 @@ void PrintConfigDef::init_fff_params()
     def->max = 100;
     def->set_default_value(new ConfigOptionFloats { 0.4 });
 
+    def = this->add("bambu_nozzle_diameter_override", coBools);
+    def->label = L("Override Bambu nozzle diameter");
+    def->tooltip = L("Reports a firmware-supported nozzle diameter to a Bambu printer without changing slicing geometry.");
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionBools { false });
+
+    def = this->add("bambu_nozzle_diameter", coFloats);
+    def->label = L("Bambu nozzle diameter");
+    def->tooltip = L("Nozzle diameter reported to a Bambu printer when the override is enabled. This does not change slicing geometry.");
+    def->sidetext = L("mm");
+    def->min = 0.2;
+    def->max = 0.8;
+    def->gui_type = ConfigOptionDef::GUIType::f_enum_open;
+    def->enum_values = { "0.2", "0.4", "0.6", "0.8" };
+    def->enum_labels = { "0.2 mm", "0.4 mm", "0.6 mm", "0.8 mm" };
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloats { 0.8 });
+
     def = this->add("notes", coString);
     def->label = L("Configuration notes");
     def->tooltip = L("You can put here your personal notes. This text will be added to the G-code "
@@ -7302,7 +7321,8 @@ void PrintConfigDef::init_extruder_option_keys()
 {
     // ConfigOptionFloats, ConfigOptionPercents, ConfigOptionBools, ConfigOptionStrings
     m_extruder_option_keys = {
-        "extruder_type", "nozzle_diameter", "default_nozzle_volume_type", "min_layer_height", "max_layer_height", "extruder_offset",
+        "extruder_type", "nozzle_diameter", "bambu_nozzle_diameter_override", "bambu_nozzle_diameter",
+        "default_nozzle_volume_type", "min_layer_height", "max_layer_height", "extruder_offset",
         "extruder_printable_height", "nozzle_volume", "nozzle_type", "nozzle_flush_dataset",
         "retraction_length", "z_hop", "z_hop_types", "travel_slope", "retract_lift_above", "retract_lift_below", "retract_lift_enforce", "retraction_speed", "deretraction_speed",
         "retract_before_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
@@ -8405,6 +8425,8 @@ std::set<std::string> filament_options_with_variant = {
 std::set<std::string> printer_extruder_options = {
     "extruder_type",
     "nozzle_diameter",
+    "bambu_nozzle_diameter_override",
+    "bambu_nozzle_diameter",
     "default_nozzle_volume_type",
     "extruder_printable_area",
     "extruder_printable_height",
@@ -10351,6 +10373,17 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
             error_message.emplace("nozzle_diameter", L("invalid value ") + cfg.nozzle_diameter.serialize());
             break;
         }
+
+    // Bambu transport overrides are intentionally independent of physical nozzle
+    // geometry. Validate only enabled entries and keep physical nozzle validation above.
+    for (size_t idx = 0; idx < cfg.bambu_nozzle_diameter_override.values.size(); ++idx) {
+        if (cfg.bambu_nozzle_diameter_override.get_at(idx) &&
+            (idx >= cfg.bambu_nozzle_diameter.values.size() ||
+             !CustomNozzle::is_supported_bambu_nozzle_diameter(cfg.bambu_nozzle_diameter.values[idx]))) {
+            error_message.emplace("bambu_nozzle_diameter", L("invalid value ") + cfg.bambu_nozzle_diameter.serialize());
+            break;
+        }
+    }
 
     // --perimeters
     if (cfg.wall_loops.value < 0) {

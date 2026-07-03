@@ -73,6 +73,11 @@ struct PlateData
     std::map<int, std::pair<int, int>> obj_inst_map;
     std::string     printer_model_id;
     std::string     nozzle_diameters;
+    // Orca provenance for Bambu transport archives. In those archives
+    // nozzle_diameters may contain the compatibility diameter advertised to
+    // the printer, while this field retains the physical slicing diameter.
+    std::string     orca_physical_nozzle_diameters;
+    bool            orca_bambu_nozzle_override {false};
     std::string     gcode_file;
     std::string     gcode_file_md5;
     std::string     thumbnail_file;
@@ -224,6 +229,16 @@ typedef std::vector<PlateData*> PlateDataPtrs;
 
 typedef std::map<int, PlateData*> PlateDataMaps;
 
+// Recover physical nozzle diameters only from explicit, consistent Orca
+// provenance when a loaded config does not already contain them.
+bool recover_orca_physical_nozzle_diameters(const PlateDataPtrs &plate_data_list, DynamicPrintConfig &config);
+
+enum class BambuMetadataMode
+{
+    Physical,
+    ReportedCompatibility
+};
+
 struct StoreParams
 {
     const char* path;
@@ -242,6 +257,7 @@ struct StoreParams
     std::vector<PlateBBoxData*> id_bboxes;
     BBLProject* project = nullptr;
     BBLProfile* profile = nullptr;
+    BambuMetadataMode bambu_metadata_mode = BambuMetadataMode::Physical;
 
     StoreParams() {}
 };
