@@ -560,9 +560,21 @@ class Print;
             //BBS: prepare stage time before print model, including start gcode time and mostly same with start gcode time
             float prepare_time;
 
+            // Orca: extra time (e.g. filament-change delay) that could not be attributed
+            // to a matching block on this pass is buffered here and applied on a later
+            // pass, so it is never dropped or folded into an unrelated move.
+            using AdditionalBufferBlock = std::pair<EMoveType, float>;
+            using AdditionalBuffer      = std::vector<AdditionalBufferBlock>;
+            AdditionalBuffer m_additional_time_buffer;
+
             void reset();
 
-            void calculate_time(GCodeProcessorResult& result, PrintEstimatedStatistics::ETimeMode mode, size_t keep_last_n_blocks = 0, float additional_time = 0.0f);
+            // Merge adjacent buffer entries that target the same move type.
+            static AdditionalBuffer merge_adjacent_additional_time_blocks(const AdditionalBuffer& buffer);
+
+            // additional_time is attributed to the first block matching target_move_type
+            // (EMoveType::Noop matches any block, i.e. the first processed block).
+            void calculate_time(GCodeProcessorResult& result, PrintEstimatedStatistics::ETimeMode mode, size_t keep_last_n_blocks = 0, float additional_time = 0.0f, EMoveType target_move_type = EMoveType::Noop);
         };
 
         struct UsedFilaments  // filaments per ColorChange
@@ -1115,10 +1127,10 @@ class Print;
         void process_custom_gcode_time(CustomGCode::Type code);
         void process_filaments(CustomGCode::Type code);
 
-        void calculate_time(GCodeProcessorResult& result, size_t keep_last_n_blocks = 0, float additional_time = 0.0f);
+        void calculate_time(GCodeProcessorResult& result, size_t keep_last_n_blocks = 0, float additional_time = 0.0f, EMoveType target_move_type = EMoveType::Noop);
 
         // Simulates firmware st_synchronize() call
-        void simulate_st_synchronize(float additional_time = 0.0f);
+        void simulate_st_synchronize(float additional_time = 0.0f, EMoveType target_move_type = EMoveType::Noop);
 
         void update_estimated_times_stats();
 
